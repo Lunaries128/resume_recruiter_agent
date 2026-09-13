@@ -22,6 +22,18 @@ SENSITIVE_CRITERIA = [
     "政治面貌",
 ]
 
+PRIVATE_OUTPUT_TERMS = [
+    "手机号",
+    "电话",
+    "联系方式",
+    "邮箱",
+    "身份证",
+    "家庭住址",
+    "住址",
+    "微信",
+    "QQ",
+]
+
 
 def redact_pii(text: str) -> str:
     """对简历正文中的隐私信息进行脱敏。"""
@@ -134,3 +146,20 @@ def safe_output_text(
     text: str,
 ) -> str:
     return redact_pii(text)
+
+def validate_privacy_request(
+    user_input: str,
+) -> None:
+    matched = [
+        word
+        for word in PRIVATE_OUTPUT_TERMS
+        if word.lower()
+        in user_input.lower()
+    ]
+
+    if matched:
+        raise ValueError(
+            "不能输出候选人的手机号、邮箱、"
+            "身份证号、住址或社交账号等"
+            "隐私信息。"
+        )

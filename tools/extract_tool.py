@@ -27,6 +27,8 @@ def ingest_resume(
     candidate_code = (
         safe_candidate_code(
             filename
+            + "\n"
+            + redacted_text
         )
     )
 

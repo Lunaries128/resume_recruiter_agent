@@ -1,6 +1,4 @@
-import os
 import secrets
-import time
 from pathlib import Path
 
 from fastapi import (
@@ -17,47 +15,31 @@ from fastapi.staticfiles import (
 )
 
 import agent
-from database import (
-    delete_candidate,
-    get_candidate,
-    get_delete_request,
-    list_candidates,
-    save_delete_request,
+from config import (
+    REPORT_DIR,
+    UPLOAD_DIR,
 )
-from resume_service import (
-    SUPPORTED_SUFFIXES,
-    ingest_resume_file,
+from database import (
+    confirm_delete_request,
+    create_delete_request,
+    get_candidate,
+    list_candidates,
 )
 from schemas import (
     ChatRequest,
-    DeleteConfirm,
+    DeleteConfirmRequest,
     DeleteRequest,
 )
-
-
-UPLOAD_PATH = Path(
-    os.getenv(
-        "UPLOAD_PATH",
-        "uploads",
-    )
+from tools.extract_tool import (
+    ingest_resume,
 )
 
-REPORT_PATH = Path(
-    os.getenv(
-        "REPORT_PATH",
-        "reports",
-    )
-)
 
-UPLOAD_PATH.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-REPORT_PATH.mkdir(
-    parents=True,
-    exist_ok=True,
-)
+SUPPORTED_SUFFIXES = {
+    ".pdf",
+    ".docx",
+    ".txt",
+}
 
 
 app = FastAPI(
@@ -76,7 +58,7 @@ app.add_middleware(
 app.mount(
     "/reports",
     StaticFiles(
-        directory=str(REPORT_PATH)
+        directory=str(REPORT_DIR)
     ),
     name="reports",
 )
@@ -86,9 +68,7 @@ app.mount(
 def health():
     return {
         "status": "ok",
-        "service": (
-            "recruitment-agent"
-        ),
+        "service": "recruitment-agent",
     }
 
 
@@ -105,46 +85,35 @@ async def upload_resumes(
     results = []
 
     for uploaded_file in files:
+        original_name = Path(
+            uploaded_file.filename or ""
+        ).name
+
         suffix = Path(
-            uploaded_file.filename
+            original_name
         ).suffix.lower()
 
         if suffix not in SUPPORTED_SUFFIXES:
             results.append({
                 "success": False,
-                "source_file": (
-                    uploaded_file.filename
+                "source_filename": (
+                    original_name
                 ),
                 "error": (
-                    "不支持的文件格式"
+                    "只支持PDF、DOCX和TXT"
                 ),
             })
 
             continue
 
-        safe_name = (
-            Path(uploaded_file.filename)
-            .name
-        )
-
-        unique_name = (
-            secrets.token_hex(6)
-            + "_"
-            + safe_name
-        )
-
-        saved_path = (
-            UPLOAD_PATH / unique_name
-        )
-
-        content = await (
-            uploaded_file.read()
-        )
+        content = await uploaded_file.read()
 
         if len(content) > 10 * 1024 * 1024:
             results.append({
                 "success": False,
-                "source_file": safe_name,
+                "source_filename": (
+                    original_name
+                ),
                 "error": (
                     "单个文件不能超过10MB"
                 ),
@@ -152,19 +121,41 @@ async def upload_resumes(
 
             continue
 
+        saved_name = (
+            secrets.token_hex(6)
+            + "_"
+            + original_name
+        )
+
+        saved_path = (
+            UPLOAD_DIR / saved_name
+        )
+
         saved_path.write_bytes(content)
 
         try:
-            result = ingest_resume_file(
-                str(saved_path)
+            profile = ingest_resume(
+                file_path=str(saved_path),
+                filename=original_name,
             )
 
-            results.append(result)
+            results.append({
+                "success": True,
+                "source_filename": (
+                    original_name
+                ),
+                "candidate_code": profile[
+                    "candidate_code"
+                ],
+                "profile": profile,
+            })
 
         except Exception as error:
             results.append({
                 "success": False,
-                "source_file": safe_name,
+                "source_filename": (
+                    original_name
+                ),
                 "error": str(error),
             })
 
@@ -173,7 +164,7 @@ async def upload_resumes(
         "success_count": sum(
             1
             for item in results
-            if item.get("success")
+            if item["success"]
         ),
         "results": results,
     }
@@ -185,9 +176,7 @@ def chat_endpoint(
 ):
     try:
         return agent.chat(
-            session_id=(
-                request.session_id
-            ),
+            session_id=request.session_id,
             hr_id=request.hr_id,
             message=request.message,
             jd=request.jd,
@@ -202,35 +191,28 @@ def chat_endpoint(
 
 @app.get("/candidates")
 def candidates_endpoint():
-    candidates = list_candidates()
-
-    # 不返回脱敏后的完整简历文本
-    for candidate in candidates:
-        candidate.pop(
-            "redacted_text",
-            None,
-        )
-
     return {
-        "count": len(candidates),
-        "candidates": candidates,
+        "count": len(
+            list_candidates()
+        ),
+        "candidates": list_candidates(),
     }
 
 
 @app.get(
-    "/candidates/{candidate_id}"
+    "/candidates/{candidate_code}"
 )
 def candidate_endpoint(
-    candidate_id: str,
+    candidate_code: str,
 ):
     candidate = get_candidate(
-        candidate_id
+        candidate_code
     )
 
     if not candidate:
         raise HTTPException(
             status_code=404,
-            detail="候选人不存在",
+            detail="候选人不存在。",
         )
 
     candidate.pop(
@@ -242,89 +224,45 @@ def candidate_endpoint(
 
 
 @app.post("/delete/request")
-def request_delete(
+def delete_request_endpoint(
     request: DeleteRequest,
 ):
-    candidate = get_candidate(
-        request.candidate_id
-    )
-
-    if not candidate:
-        raise HTTPException(
-            status_code=404,
-            detail="候选人不存在",
+    try:
+        result = create_delete_request(
+            request.candidate_code
         )
 
-    token = secrets.token_urlsafe(24)
-    expires_at = time.time() + 300
-
-    save_delete_request(
-        token=token,
-        candidate_id=(
-            request.candidate_id
-        ),
-        expires_at=expires_at,
-    )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        ) from error
 
     return {
         "requires_confirmation": True,
-        "token": token,
-        "candidate_id": (
-            request.candidate_id
-        ),
+        **result,
         "message": (
-            "该操作会永久删除候选人。"
+            "该操作会永久删除候选人数据。"
             "请在5分钟内人工确认。"
         ),
     }
 
 
 @app.post("/delete/confirm")
-def confirm_delete(
-    request: DeleteConfirm,
+def delete_confirm_endpoint(
+    request: DeleteConfirmRequest,
 ):
-    record = get_delete_request(
-        request.token
-    )
-
-    if not record:
-        raise HTTPException(
-            status_code=404,
-            detail="确认请求不存在",
+    try:
+        return confirm_delete_request(
+            token=request.token,
+            confirmed=request.confirmed,
         )
 
-    if record["used"]:
+    except ValueError as error:
         raise HTTPException(
             status_code=400,
-            detail="确认请求已使用",
-        )
-
-    if record["expires_at"] < time.time():
-        raise HTTPException(
-            status_code=400,
-            detail="确认请求已过期",
-        )
-
-    if not request.confirmed:
-        return {
-            "success": False,
-            "message": "用户取消删除",
-        }
-
-    delete_candidate(
-        candidate_id=(
-            record["candidate_id"]
-        ),
-        token=request.token,
-    )
-
-    return {
-        "success": True,
-        "candidate_id": (
-            record["candidate_id"]
-        ),
-        "message": "候选人已删除",
-    }
+            detail=str(error),
+        ) from error
 
 
 @app.post(

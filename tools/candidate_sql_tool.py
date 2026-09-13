@@ -6,7 +6,7 @@ from langchain_core.tools import tool
 from database import get_connection
 
 
-FORBIDDEN_WORDS = [
+FORBIDDEN_WORDS = {
     "insert",
     "update",
     "delete",
@@ -17,7 +17,56 @@ FORBIDDEN_WORDS = [
     "pragma",
     "replace",
     "create",
-]
+    "truncate",
+    "vacuum",
+}
+
+
+def validate_sql(
+    sql: str,
+) -> tuple[bool, str]:
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        sql.strip().lower(),
+    )
+
+    if not normalized.startswith(
+        "select "
+    ):
+        return (
+            False,
+            "只允许SELECT查询。",
+        )
+
+    statement = normalized.rstrip(";")
+
+    if ";" in statement:
+        return (
+            False,
+            "只允许执行单条SQL。",
+        )
+
+    for word in FORBIDDEN_WORDS:
+        if re.search(
+            rf"\b{word}\b",
+            statement,
+        ):
+            return (
+                False,
+                f"SQL禁止使用{word}。",
+            )
+
+    if not re.search(
+        r"\bfrom\s+candidate_safe_view\b",
+        statement,
+    ):
+        return (
+            False,
+            "只能查询candidate_safe_view。",
+        )
+
+    return True, ""
 
 
 @tool
@@ -25,50 +74,22 @@ def query_candidates(
     sql: str,
 ) -> str:
     """
-    使用只读SQL查询候选人库。
+    使用只读SQL查询候选人安全视图。
 
-    只能查询 candidates 表，
-    只能执行单条 SELECT。
+    只能查询candidate_safe_view，
+    只能执行单条SELECT。
     """
 
-    normalized = (
-        re.sub(
-            r"\s+",
-            " ",
-            sql.strip().lower(),
+    valid, message = validate_sql(sql)
+
+    if not valid:
+        return json.dumps(
+            {
+                "success": False,
+                "error": message,
+            },
+            ensure_ascii=False,
         )
-    )
-
-    if not normalized.startswith(
-        "select "
-    ):
-        return json.dumps({
-            "success": False,
-            "error": "只允许SELECT查询",
-        }, ensure_ascii=False)
-
-    if any(
-        word in normalized
-        for word in FORBIDDEN_WORDS
-    ):
-        return json.dumps({
-            "success": False,
-            "error": "SQL包含禁止操作",
-        }, ensure_ascii=False)
-
-    if normalized.count(";") > 1:
-        return json.dumps({
-            "success": False,
-            "error": "只允许单条SQL",
-        }, ensure_ascii=False)
-
-    if "candidates" not in normalized:
-        return json.dumps({
-            "success": False,
-            "error": (
-                "只能查询candidates表"
-            ),
-        }, ensure_ascii=False)
 
     try:
         with get_connection() as connection:
@@ -76,24 +97,14 @@ def query_candidates(
                 sql
             ).fetchall()
 
-        safe_rows = []
-
-        for row in rows[:100]:
-            item = dict(row)
-
-            # 不向Agent返回整份简历正文
-            item.pop(
-                "redacted_text",
-                None,
-            )
-
-            safe_rows.append(item)
-
         return json.dumps(
             {
                 "success": True,
-                "count": len(safe_rows),
-                "rows": safe_rows,
+                "count": len(rows),
+                "rows": [
+                    dict(row)
+                    for row in rows[:100]
+                ],
             },
             ensure_ascii=False,
         )

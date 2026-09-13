@@ -61,17 +61,17 @@ def candidate_dataframe(
     for item in candidates:
         rows.append({
             "候选人编号": item[
-                "candidate_id"
+                "candidate_code"
             ],
             "来源文件": item[
-                "source_file"
+                "source_filename"
             ],
             "最高学历": item.get(
                 "highest_education",
                 "未知",
             ),
             "工作年限": item.get(
-                "total_years",
+                "work_years",
                 0,
             ),
             "技能": "、".join(
@@ -126,7 +126,7 @@ def render_radar(
             ),
             fill="toself",
             name=candidate[
-                "candidate_id"
+                "candidate_code"
             ],
         )
     )
@@ -339,10 +339,10 @@ with ranking_tab:
                 use_container_width=True,
             )
 
-        selected_id = st.selectbox(
+        selected_code = st.selectbox(
             "查看候选人评分明细",
             [
-                item["candidate_id"]
+                item["candidate_code"]
                 for item in candidates
             ],
         )
@@ -351,8 +351,8 @@ with ranking_tab:
             item
             for item in candidates
             if (
-                item["candidate_id"]
-                == selected_id
+                    item["candidate_code"]
+                    == selected_code
             )
         )
 
@@ -372,8 +372,8 @@ with ranking_tab:
             response = requests.post(
                 f"{API_URL}/delete/request",
                 json={
-                    "candidate_id": (
-                        selected_id
+                    "candidate_code": (
+                        selected_code
                     ),
                 },
                 timeout=15,

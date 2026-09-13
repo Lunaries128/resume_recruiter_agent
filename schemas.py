@@ -14,6 +14,7 @@ class EducationItem(BaseModel):
 class ProjectItem(BaseModel):
     name: str = ""
     description: str = ""
+
     technologies: list[str] = Field(
         default_factory=list
     )
@@ -64,9 +65,18 @@ class CandidateProfile(BaseModel):
         cls,
         value,
     ):
+        try:
+            number = float(value)
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return 0
+
         return max(
             0,
-            min(float(value), 60),
+            min(number, 60),
         )
 
 
@@ -77,27 +87,23 @@ class ScoreWeights(BaseModel):
     projects: float = 0.10
 
     def normalized(self):
-        total = (
-            self.skills
-            + self.experience
-            + self.education
-            + self.projects
-        )
+        values = [
+            max(self.skills, 0),
+            max(self.experience, 0),
+            max(self.education, 0),
+            max(self.projects, 0),
+        ]
+
+        total = sum(values)
 
         if total <= 0:
             return ScoreWeights()
 
         return ScoreWeights(
-            skills=self.skills / total,
-            experience=(
-                self.experience / total
-            ),
-            education=(
-                self.education / total
-            ),
-            projects=(
-                self.projects / total
-            ),
+            skills=values[0] / total,
+            experience=values[1] / total,
+            education=values[2] / total,
+            projects=values[3] / total,
         )
 
 
@@ -110,11 +116,25 @@ class ScoreResult(BaseModel):
     education_score: float
     project_score: float
 
-    matched_skills: list[str]
-    missing_skills: list[str]
+    matched_skills: list[str] = Field(
+        default_factory=list
+    )
 
-    evidence: list[str]
-    uncertainties: list[str]
+    missing_skills: list[str] = Field(
+        default_factory=list
+    )
+
+    matched_projects: list[str] = Field(
+        default_factory=list
+    )
+
+    evidence: list[str] = Field(
+        default_factory=list
+    )
+
+    uncertainties: list[str] = Field(
+        default_factory=list
+    )
 
     recommendation: str = (
         "仅供HR人工复核，"
@@ -124,9 +144,9 @@ class ScoreResult(BaseModel):
 
 class ChatRequest(BaseModel):
     session_id: str
-    hr_id: str
+    hr_id: str = "default_hr"
     message: str
-    jd: str
+    jd: str = ""
 
 
 class DeleteRequest(BaseModel):
@@ -135,4 +155,4 @@ class DeleteRequest(BaseModel):
 
 class DeleteConfirmRequest(BaseModel):
     token: str
-    confirmed: boolr
+    confirmed: bool
