@@ -30,12 +30,12 @@ DATABASE_PATH = DATA_DIR / "recruitment.db"
 
 MODEL_NAME = os.getenv(
     "MODEL_NAME",
-    "qwen-plus",
+    "sensenova-6.8-flash-lite",
 )
 
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
-    "text-embedding-v4",
+    "sensenova/piccolo-large-zh-v2",
 )
 
 API_URL = os.getenv(
