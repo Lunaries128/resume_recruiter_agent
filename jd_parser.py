@@ -68,10 +68,7 @@ def model_json(system, data):
     延迟导入模型依赖，避免前端仅导入数据结构时
     就初始化模型连接。
     """
-    import os
-
-    from config import MODEL_NAME
-    from langchain_openai import ChatOpenAI
+    from llm import llm
 
     text = json.dumps(
         data,
@@ -84,16 +81,7 @@ def model_json(system, data):
             "系统不会静默截断证据。"
         )
 
-    model = ChatOpenAI(
-        model=MODEL_NAME,
-        temperature=0,
-        timeout=50,
-        max_retries=0,
-        api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL"),
-    )
-
-    result = model.invoke(
+    response = llm.invoke(
         [
             (
                 "system",
@@ -107,9 +95,16 @@ def model_json(system, data):
                 text,
             ),
         ]
-    ).content
+    )
 
-    if not isinstance(result, str):
+    if response.response_metadata.get("finish_reason") == "length":
+        raise ValueError(
+            "模型输出达到token上限，JSON不完整，请精简输入后重试。"
+        )
+
+    result = response.content
+
+    if not isinstance(result, str) or not result.strip():
         raise ValueError(
             "模型没有返回文本JSON。"
         )

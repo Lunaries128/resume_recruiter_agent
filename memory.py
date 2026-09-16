@@ -1,126 +1,64 @@
-import threading
-
-from datetime import datetime, timezone
+import os
+import uuid
 
 from langchain_chroma import Chroma
-from langchain_core.documents import Document
+from langchain_core.documents import (
+    Document,
+)
 
-from config import CHROMA_DIR
 from llm import embeddings
 
 
-# 与旧的在线向量模型索引分开保存。
-LOCAL_MEMORY_DIR = (
-    CHROMA_DIR
-    / f"local_{embeddings.index_tag}"
+CHROMA_PATH = os.getenv(
+    "CHROMA_PATH",
+    "data/hr_memory",
 )
 
-_vector_store = None
-_store_lock = threading.Lock()
+
+vector_store = Chroma(
+    collection_name="hr_preferences",
+    embedding_function=embeddings,
+    persist_directory=CHROMA_PATH,
+)
 
 
-def get_vector_store():
-    global _vector_store
-
-    if _vector_store is not None:
-        return _vector_store
-
-    with _store_lock:
-        if _vector_store is not None:
-            return _vector_store
-
-        LOCAL_MEMORY_DIR.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        _vector_store = Chroma(
-            collection_name="hr_preferences",
-            embedding_function=embeddings,
-            persist_directory=str(
-                LOCAL_MEMORY_DIR
-            ),
-        )
-
-    return _vector_store
-
-
-def save_preference(
+def save_hr_preference(
     hr_id: str,
     preference: str,
-):
+) -> dict:
     """
-    保存HR明确提出的岗位相关偏好。
-
-    先执行原有安全校验，
-    再用本地模型计算向量并保存。
+    只保存HR明确要求记住的、
+    与岗位相关的筛选偏好。
     """
-    from guardrails import (
-        validate_filter_request,
-    )
 
-    hr_id = str(hr_id).strip()
-    preference = str(preference).strip()
-
-    if not hr_id:
-        raise ValueError(
-            "缺少HR标识，不能保存偏好。"
+    vector_store.add_documents([
+        Document(
+            page_content=preference,
+            metadata={
+                "hr_id": hr_id,
+                "type": (
+                    "screening_preference"
+                ),
+            },
         )
-
-    if not preference:
-        raise ValueError(
-            "偏好内容不能为空。"
-        )
-
-    validate_filter_request(
-        preference
-    )
-
-    document = Document(
-        page_content=preference,
-        metadata={
-            "hr_id": hr_id,
-            "created_at": datetime.now(
-                timezone.utc
-            ).isoformat(),
-        },
-    )
-
-    get_vector_store().add_documents(
-        [document]
-    )
+    ], ids=[str(uuid.uuid4())])
 
     return {
         "success": True,
-        "message": "偏好已保存至本地长期记忆。",
+        "message": "偏好已保存",
+        "preference": preference,
     }
 
 
-def retrieve_preferences(
+def search_hr_preferences(
     hr_id: str,
     query: str,
-    top_k: int = 4,
+    k: int = 4,
 ) -> list[str]:
-    """
-    按HR标识隔离检索偏好。
-    向量计算使用本地模型。
-    """
-    hr_id = str(hr_id).strip()
-    query = str(query).strip()
-
-    if not hr_id:
-        raise ValueError(
-            "缺少HR标识，不能读取偏好。"
-        )
-
-    if not query or top_k <= 0:
-        return []
-
     results = (
-        get_vector_store()
-        .similarity_search(
+        vector_store.similarity_search(
             query=query,
-            k=min(int(top_k), 20),
+            k=k,
             filter={
                 "hr_id": hr_id,
             },
