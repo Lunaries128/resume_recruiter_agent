@@ -13,6 +13,9 @@ chroma_hr_memory/
 
 tests/evaluation_result.json
 
+model_cache/
+chroma_hr_memory/
+
 .DS_Store
 Thumbs.db
 

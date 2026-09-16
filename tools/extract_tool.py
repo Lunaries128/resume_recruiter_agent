@@ -107,13 +107,22 @@ def extract_document(
 简历：
 """ + text[:50000]
 
-    data = (
-        llm.with_structured_output(
-            ExtractedProfile
-        )
-        .invoke(prompt)
-        .model_dump()
+    structured_llm = llm.with_structured_output(
+        ExtractedProfile,
+        method="function_calling",
     )
+
+    data = structured_llm.invoke(prompt)
+
+    if data is None:
+        raise ValueError(
+            "模型未返回有效的结构化简历，"
+            "请稍后重试。"
+        )
+
+    # 确保后续代码拿到的是经过校验的对象。
+    # 原本已经是ExtractedProfile时，不会改变其内容。
+    data = ExtractedProfile.model_validate(data)
 
     inferred_name = data.pop(
         "candidate_name",
