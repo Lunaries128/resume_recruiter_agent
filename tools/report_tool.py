@@ -1,145 +1,25 @@
 import json
-from datetime import datetime
-from pathlib import Path
-
+import uuid
 from langchain_core.tools import tool
-
-from config import REPORT_DIR
-from database import get_candidate
-from guardrails import safe_output_text
+from database import list_candidates, current_session, HISTORY_DIR, get_session
 
 
 @tool
-def generate_candidate_report(
-    jd: str,
-    score_results: list[dict],
-) -> dict:
-    """
-    根据候选人评分结果生成Markdown评估报告。
-    """
-
-    sorted_results = sorted(
-        score_results,
-        key=lambda item: item.get(
-            "total_score",
-            0,
-        ),
-        reverse=True,
-    )
-
-    lines = [
-        "# 候选人岗位匹配评估报告",
-        "",
-        "## 使用说明",
-        "",
-        (
-            "本报告仅用于HR人工复核，"
-            "不得作为自动录用或淘汰决定。"
-        ),
-        "",
-        "## 岗位要求",
-        "",
-        safe_output_text(jd),
-        "",
-        "## 候选人排名",
-        "",
-        (
-            "|排名|候选人编号|总分|"
-            "技能|经验|学历|项目|"
-        ),
-        "|---:|---|---:|---:|---:|---:|---:|",
-    ]
-
-    for index, result in enumerate(
-        sorted_results,
-        start=1,
-    ):
-        lines.append(
-            f"|{index}|"
-            f"{result['candidate_code']}|"
-            f"{result['total_score']}|"
-            f"{result['skill_score']}|"
-            f"{result['experience_score']}|"
-            f"{result['education_score']}|"
-            f"{result['project_score']}|"
-        )
-
-    lines.extend([
-        "",
-        "## 详细说明",
-        "",
-    ])
-
-    for result in sorted_results:
-        candidate = get_candidate(
-            result["candidate_code"]
-        )
-
-        lines.extend([
-            (
-                f"### "
-                f"{result['candidate_code']}"
-            ),
-            "",
-            (
-                f"- 综合匹配度："
-                f"{result['total_score']}"
-            ),
-            (
-                "- 已匹配技能："
-                + "、".join(
-                    result.get(
-                        "matched_skills",
-                        [],
-                    )
-                )
-            ),
-            (
-                "- 缺失技能："
-                + "、".join(
-                    result.get(
-                        "missing_skills",
-                        [],
-                    )
-                )
-            ),
-            (
-                "- 信息不确定项："
-                + "、".join(
-                    result.get(
-                        "uncertainties",
-                        [],
-                    )
-                )
-            ),
-            (
-                "- 简历摘要："
-                + (
-                    candidate["summary"]
-                    if candidate
-                    else "无"
-                )
-            ),
-            "",
-        ])
-
-    timestamp = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
-    )
-
-    path = REPORT_DIR / (
-        f"candidate_report_{timestamp}.md"
-    )
-
-    path.write_text(
-        "\n".join(lines),
-        encoding="utf-8",
-    )
-
-    return {
-        "success": True,
-        "report_path": str(path),
-        "candidate_count": len(
-            sorted_results
-        ),
-    }
+def generate_candidate_report() -> str:
+    """生成当前会话候选人的岗位匹配报告，不接受其他会话的候选人数据。"""
+    sid = current_session()
+    candidates = list_candidates()
+    folder = HISTORY_DIR / sid / 'reports'
+    folder.mkdir(parents=True, exist_ok=True)
+    filename = uuid.uuid4().hex + '.md'
+    lines = ['# 候选人匹配报告', '', '## 招聘要求', get_session(sid)['jd'], '']
+    for candidate in candidates:
+        lines += ['## ' + candidate['candidate_code'],
+                  '匹配分：' + str(candidate.get('match_score') if candidate.get('match_score') is not None else '未评分')]
+        lines += candidate.get('score_detail', {}).get('audit_log', [])
+        lines.append('')
+    (folder / filename).write_text('\n\n'.join(lines), encoding='utf-8')
+    return json.dumps({'success': True, 'filename': filename,
+                      'message': '报告已保存，可从本会话招聘要求页面下载。',
+                      'candidates': [{'candidate_code': c['candidate_code'], 'match_score': c['match_score']}
+                                     for c in candidates]}, ensure_ascii=False)

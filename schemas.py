@@ -1,156 +1,108 @@
-from pydantic import (
-    BaseModel,
-    Field,
-    field_validator,
-)
+from typing import Literal
+from pydantic import BaseModel, Field
 
 
 class EducationItem(BaseModel):
     school: str = ""
     degree: str = ""
     major: str = ""
+    start_date: str = ""
+    end_date: str = ""
+
+
+class ExperienceItem(BaseModel):
+    organization: str = ""
+    role: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    actions: list[str] = Field(default_factory=list)
+    results: list[str] = Field(default_factory=list)
+    technologies: list[str] = Field(default_factory=list)
 
 
 class ProjectItem(BaseModel):
     name: str = ""
     description: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    actions: list[str] = Field(default_factory=list)
+    results: list[str] = Field(default_factory=list)
+    technologies: list[str] = Field(default_factory=list)
 
-    technologies: list[str] = Field(
-        default_factory=list
-    )
+
+class AwardItem(BaseModel):
+    name: str = ""
+    level: str = ""
+    date: str = ""
 
 
 class CandidateProfile(BaseModel):
     candidate_code: str = ""
-
-    education: list[
-        EducationItem
-    ] = Field(
-        default_factory=list
-    )
-
-    skills: list[str] = Field(
-        default_factory=list
-    )
-
-    work_years: float = 0
-
-    job_titles: list[str] = Field(
-        default_factory=list
-    )
-
-    companies: list[str] = Field(
-        default_factory=list
-    )
-
-    projects: list[
-        ProjectItem
-    ] = Field(
-        default_factory=list
-    )
-
-    certificates: list[str] = Field(
-        default_factory=list
-    )
-
+    masked_name: str = "候选人*"
+    masked_phone: str = ""
+    email: str = ""
+    education: list[EducationItem] = Field(default_factory=list)
+    experiences: list[ExperienceItem] = Field(default_factory=list)
+    projects: list[ProjectItem] = Field(default_factory=list)
+    awards: list[AwardItem] = Field(default_factory=list)
+    certificates: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    work_years: float = Field(default=0, ge=0, le=60)
     summary: str = ""
-
-    missing_fields: list[str] = Field(
-        default_factory=list
-    )
-
-    @field_validator("work_years")
-    @classmethod
-    def validate_work_years(
-        cls,
-        value,
-    ):
-        try:
-            number = float(value)
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-            return 0
-
-        return max(
-            0,
-            min(number, 60),
-        )
+    missing_fields: list[str] = Field(default_factory=list)
 
 
-class ScoreWeights(BaseModel):
-    skills: float = 0.50
-    experience: float = 0.25
-    education: float = 0.15
-    projects: float = 0.10
-
-    def normalized(self):
-        values = [
-            max(self.skills, 0),
-            max(self.experience, 0),
-            max(self.education, 0),
-            max(self.projects, 0),
-        ]
-
-        total = sum(values)
-
-        if total <= 0:
-            return ScoreWeights()
-
-        return ScoreWeights(
-            skills=values[0] / total,
-            experience=values[1] / total,
-            education=values[2] / total,
-            projects=values[3] / total,
-        )
+class MatchDimension(BaseModel):
+    key: str
+    name: str
+    score: float = Field(ge=0, le=100)
+    weight: float = Field(ge=0, le=1)
+    status: Literal['satisfied', 'partial', 'unsatisfied']
+    requirement: str = ""
+    candidate_value: str = ""
+    evidence_source: str = ""
+    evidence: list[str] = Field(default_factory=list)
 
 
 class ScoreResult(BaseModel):
     candidate_code: str
-    total_score: float
+    total_score: float = Field(ge=0, le=100)
+    dimensions: list[MatchDimension] = Field(default_factory=list)
+    satisfied: list[str] = Field(default_factory=list)
+    partial: list[str] = Field(default_factory=list)
+    unsatisfied: list[str] = Field(default_factory=list)
+    audit_log: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
 
-    skill_score: float
-    experience_score: float
-    education_score: float
-    project_score: float
 
-    matched_skills: list[str] = Field(
-        default_factory=list
-    )
+class JobRequirements(BaseModel):
+    minimum_education: str = ""
+    required_majors: list[str] = Field(default_factory=list)
+    minimum_work_years: float = Field(default=0, ge=0, le=60)
+    required_skills: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
+    project_keywords: list[str] = Field(default_factory=list)
+    award_keywords: list[str] = Field(default_factory=list)
 
-    missing_skills: list[str] = Field(
-        default_factory=list
-    )
 
-    matched_projects: list[str] = Field(
-        default_factory=list
-    )
-
-    evidence: list[str] = Field(
-        default_factory=list
-    )
-
-    uncertainties: list[str] = Field(
-        default_factory=list
-    )
-
-    recommendation: str = (
-        "仅供HR人工复核，"
-        "不得作为自动录用或淘汰决定。"
-    )
+class SessionEdit(BaseModel):
+    title: str | None = Field(default=None, max_length=80)
+    pinned: bool | None = None
+    jd: str | None = Field(default=None, max_length=20000)
 
 
 class ChatRequest(BaseModel):
-    session_id: str
+    message: str = Field(min_length=1, max_length=10000)
     hr_id: str = "default_hr"
-    message: str
-    jd: str = ""
+
+
+class ScoreAllRequest(BaseModel):
+    jd: str = Field(min_length=1, max_length=20000)
 
 
 class DeleteRequest(BaseModel):
-    candidate_code: str
+    kind: Literal['session', 'uploads']
+    targets: list[str] = Field(default_factory=list)
 
 
 class DeleteConfirmRequest(BaseModel):
