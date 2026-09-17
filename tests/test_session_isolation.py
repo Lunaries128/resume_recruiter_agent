@@ -148,7 +148,7 @@ class SessionTests(unittest.TestCase):
 
     def test_timeout_kills_real_process_and_keeps_original(self):
         uid, path = self.upload(self.a, successful=False)
-        source = ast.parse((ROOT/'api.py').read_text(encoding='utf-8'))
+        source = ast.parse((ROOT/'legacy_api.py').read_text(encoding='utf-8'))
         node = next(x for x in source.body if isinstance(x, ast.FunctionDef) and x.name=='process_upload')
         processes = []
         def spawn(*args, **kwargs):
@@ -159,7 +159,7 @@ class SessionTests(unittest.TestCase):
         fake_subprocess = SimpleNamespace(Popen=spawn, PIPE=subprocess.PIPE,
             DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired)
         namespace = {'db':db, 'subprocess':fake_subprocess, 'sys':sys, 'Path':Path,
-                     '__file__':str(ROOT/'api.py'), 'json':json, 'PARSE_TIMEOUT_SECONDS':0.1}
+                     '__file__':str(ROOT/'legacy_api.py'), 'json':json, 'PARSE_TIMEOUT_SECONDS':0.1}
         exec(compile(ast.Module(body=[node], type_ignores=[]), '<process_upload>', 'exec'), namespace)
         result = namespace['process_upload'](self.a, uid)
         self.assertEqual(result['status'], '解析超时')

@@ -1,218 +1,334 @@
 import json
-import logging
+import os
 import subprocess
 import sys
 import threading
 import uuid
-from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import File, UploadFile
+from pydantic import BaseModel, Field
 
 import database as db
-from schemas import (CandidateProfile, ChatRequest, DeleteConfirmRequest,
-                     DeleteRequest, ScoreAllRequest, SessionEdit)
+import legacy_api as old
+import hr_workflow as flow
+from schemas import CandidateProfile, ScoreAllRequest
+
+
+app = old.app
+locks = old._locks
+pool = ThreadPoolExecutor(max_workers=2)
+queued = set()
+queue_lock = threading.Lock()
+
+
+def process(sid, uid):
+    child = None
+
+    try:
+        record = db.get_upload(sid, uid)
+        db.claim_upload(sid, uid)
+
+        timeout = int(
+            os.getenv('PARSE_TIMEOUT_SECONDS', '180')
+        )
+
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).with_name('parse_worker.py')),
+                record['stored_path'],
+            ],
+            cwd=Path(__file__).parent,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(
+                subprocess,
+                'CREATE_NO_WINDOW',
+                0,
+            ),
+        )
+
+        output, _ = child.communicate(timeout=timeout)
+
+        if child.returncode:
+            raise ValueError(
+                '解析进程异常退出，请检查模型与OCR配置。'
+            )
+
+        result = json.loads(output.decode('utf-8'))
+
+        if not result.get('success'):
+            raise ValueError(
+                result.get('error', '解析失败')
+            )
+
+        profile = CandidateProfile.model_validate(
+            result['profile']
+        ).model_dump()
+
+        db.finish_upload(
+            sid,
+            uid,
+            profile=profile,
+            confidence=result.get('confidence', 0),
+            metadata=result.get('metadata', {}),
+        )
+
+    except Exception as exc:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate()
+
+        try:
+            db.finish_upload(
+                sid,
+                uid,
+                status='解析或入库失败',
+                error=(
+                    '解析超时，请重试。'
+                    if isinstance(exc, subprocess.TimeoutExpired)
+                    else str(exc)
+                ),
+            )
+        except ValueError:
+            pass
+
+    finally:
+        with queue_lock:
+            queued.discard((sid, uid))
+
+
+def enqueue(sid, uid):
+    record = db.get_upload(sid, uid)
+
+    if record['status'] == '成功入库':
+        raise ValueError('已成功入库，无需重试。')
+
+    with queue_lock:
+        if (sid, uid) in queued:
+            return
+
+        queued.add((sid, uid))
+
+    pool.submit(process, sid, uid)
+
 
 @asynccontextmanager
 async def lifespan(app):
     db.recover_interrupted_uploads()
-    yield
 
+    for session in db.list_sessions():
+        for upload in db.list_uploads(session['id']):
+            if upload['status'] == '等待解析':
+                enqueue(session['id'], upload['id'])
 
-app = FastAPI(title='本地会话隔离招聘助理', lifespan=lifespan)
-_locks = defaultdict(threading.RLock)
-logger = logging.getLogger(__name__)
-PARSE_TIMEOUT_SECONDS = 60
-
-
-@app.exception_handler(ValueError)
-async def invalid_request(request, exc):
-    from fastapi.responses import JSONResponse
-    return JSONResponse(status_code=400, content={'detail': str(exc)})
-
-
-@app.get('/health')
-def health():
-    return {'status': 'ok', 'version': 'local-sessions-v1'}
-
-
-@app.get('/sessions')
-def sessions():
-    return {'sessions': db.list_sessions()}
-
-
-@app.post('/sessions')
-def create_session():
-    return db.create_session()
-
-
-@app.get('/sessions/{sid}')
-def session_detail(sid: str):
-    return db.get_session(sid)
-
-
-@app.patch('/sessions/{sid}')
-def edit_session(sid: str, request: SessionEdit):
-    with _locks[sid]:
-        return db.update_session(sid, **request.model_dump(exclude_none=True))
-
-
-@app.get('/sessions/{sid}/uploads')
-def uploads(sid: str):
-    return {'uploads': db.list_uploads(sid)}
-
-
-def process_upload(sid, uid):
-    record = db.get_upload(sid, uid)
-    db.claim_upload(sid, uid)
-    process = None
     try:
-        # 子进程无数据库写权限逻辑，超时后终止，不会出现迟到入库。
-        process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).with_name('parse_worker.py')), record['stored_path']],
-            cwd=Path(__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-        )
-        output, _ = process.communicate(timeout=PARSE_TIMEOUT_SECONDS)
-        if process.returncode != 0:
-            raise ValueError('解析进程异常退出，请检查OCR依赖和模型配置。')
-        result = json.loads(output.decode('utf-8'))
-        if not result.get('success'):
-            raise ValueError(result.get('error', '格式无法解析'))
-        profile = CandidateProfile.model_validate(result['profile']).model_dump()
-        db.finish_upload(sid, uid, profile=profile,
-                         confidence=max(0, min(100, float(result.get('confidence', 0)))),
-                         metadata=result.get('metadata', {}))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        db.finish_upload(sid, uid, status='解析超时', error='解析及结构化抽取超过60秒，已终止，可查看原文件后重试。')
-    except Exception as exc:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.communicate()
-        db.finish_upload(sid, uid, status='解析或入库失败', error=f'{type(exc).__name__}: {exc}')
-    return db.get_upload(sid, uid)
+        yield
+    finally:
+        pool.shutdown(wait=True)
+
+
+app.router.lifespan_context = lifespan
+
+
+class PrepareRequest(BaseModel):
+    jd: str = Field(min_length=1, max_length=20000)
+    hr_id: str = 'default_hr'
+    scope: str = '通用'
+    use_memory: bool = True
+
+
+class ConfirmRequest(BaseModel):
+    requirements: list[dict]
+    dimension_weights: dict[str, float]
+
+
+class PreferenceRequest(BaseModel):
+    hr_id: str
+    content: str = Field(min_length=1, max_length=1000)
+    scope: str = '通用'
+    enabled: bool = True
 
 
 @app.post('/sessions/{sid}/uploads')
 def upload(sid: str, file: UploadFile = File(...)):
     db.get_session(sid)
-    filename = Path((file.filename or '简历').replace('\\', '/')).name
+
+    name = Path(
+        (file.filename or 'resume.txt').replace('\\', '/')
+    ).name
+
+    suffix = Path(name).suffix.lower()
+
+    if suffix not in ('.pdf', '.docx', '.txt'):
+        raise ValueError('只支持PDF、DOCX、TXT。')
+
     content = file.file.read(10 * 1024 * 1024 + 1)
-    if len(content) > 10 * 1024 * 1024:
-        raise ValueError('上传失败：文件超过10MB，未保存原文件。')
-    if not content:
-        raise ValueError('上传失败：空文件，未保存原文件。')
+
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise ValueError('文件为空或超过10MB。')
+
     uid = uuid.uuid4().hex
-    suffix = Path(filename).suffix.lower()
     folder = db.HISTORY_DIR / sid / 'uploads'
     folder.mkdir(parents=True, exist_ok=True)
+
     path = folder / (uid + suffix)
     path.write_bytes(content)
+
     try:
-        db.add_upload(sid, filename, path, uid)
+        db.add_upload(sid, name, path, uid)
     except Exception:
         path.unlink(missing_ok=True)
         raise
-    if suffix not in ('.pdf', '.docx', '.txt'):
-        db.finish_upload(sid, uid, status='格式无法解析', error='只支持PDF、DOCX和TXT；原文件已保留。')
-        return db.get_upload(sid, uid)
-    return process_upload(sid, uid)
+
+    enqueue(sid, uid)
+    return db.get_upload(sid, uid)
 
 
 @app.post('/sessions/{sid}/uploads/{uid}/retry')
-def retry_upload(sid: str, uid: str):
-    return process_upload(sid, uid)
+def retry(sid: str, uid: str):
+    enqueue(sid, uid)
+    return db.get_upload(sid, uid)
 
 
-@app.get('/sessions/{sid}/uploads/{uid}/original')
-def original(sid: str, uid: str):
-    record = db.get_upload(sid, uid)
-    path = Path(record['stored_path']).resolve()
-    if path.parent != (db.HISTORY_DIR / sid / 'uploads').resolve() or not path.is_file():
-        raise HTTPException(status_code=404, detail='原文件不存在。')
-    return FileResponse(path, filename=record['filename'], content_disposition_type='inline')
+@app.get('/sessions/{sid}/criteria')
+def criteria(sid: str):
+    return flow.get_criteria(sid)
+
+
+@app.post('/sessions/{sid}/criteria/prepare')
+def prepare(sid: str, body: PrepareRequest):
+    with locks[sid]:
+        return flow.prepare(
+            sid,
+            body.jd,
+            body.hr_id,
+            body.scope,
+            body.use_memory,
+        )
+
+
+@app.post('/sessions/{sid}/criteria/confirm')
+def confirm(sid: str, body: ConfirmRequest):
+    with locks[sid]:
+        return flow.confirm(
+            sid,
+            body.requirements,
+            body.dimension_weights,
+        )
 
 
 @app.get('/sessions/{sid}/candidates')
 def candidates(sid: str):
     with db.session_scope(sid):
-        return {'candidates': db.list_candidates()}
+        return {
+            'candidates': flow.candidates(),
+        }
 
 
 @app.post('/sessions/{sid}/score')
-def score(sid: str, request: ScoreAllRequest):
-    from services.jd_service import extract_jd_requirements
-    from tools.score_tool import score_candidate
-    with _locks[sid], db.session_scope(sid):
-        candidates = db.list_candidates()
-        if not candidates:
-            raise ValueError('当前会话尚无成功入库的候选人。')
-        db.update_session(sid, jd=request.jd)
-        try:
-            requirements = extract_jd_requirements(request.jd)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f'岗位要求解析失败：{type(exc).__name__}: {exc}') from exc
+def score(sid: str, body: ScoreAllRequest):
+    with locks[sid], db.session_scope(sid):
+        spec = flow.get_criteria(sid, True)['criteria']
+
+        if body.jd.strip() != spec['jd_text']:
+            raise ValueError('JD已修改，请重新确认标准。')
+
         results = []
-        for candidate in candidates:
-            code = candidate['candidate_code']
+
+        for item in db.list_candidates():
+            code = item['candidate_code']
+
             try:
-                results.append({'success': True, 'candidate_code': code,
-                                'result': score_candidate(code, requirements)})
+                results.append({
+                    'success': True,
+                    'candidate_code': code,
+                    'result': flow.score_one(code),
+                })
             except Exception as exc:
-                logger.exception('候选人评分失败')
-                results.append({'success': False, 'candidate_code': code,
-                                'error': f'{type(exc).__name__}: {exc}'})
-        return {'results': results, 'requirements': requirements}
+                results.append({
+                    'success': False,
+                    'candidate_code': code,
+                    'error': str(exc),
+                })
+
+        return {
+            'requirements': spec,
+            'results': results,
+        }
 
 
-@app.get('/sessions/{sid}/messages')
-def messages(sid: str):
-    return {'messages': db.list_messages(sid)}
+@app.post('/sessions/{sid}/screening-reports')
+def report(sid: str, body: old.ReportRequest):
+    with locks[sid], db.session_scope(sid):
+        rows = flow.candidates()
+
+        selected = [
+            item
+            for item in rows
+            if not body.candidate_codes
+            or item['candidate_code'] in body.candidate_codes
+        ]
+
+        if (
+            not selected
+            or any(
+                item['match_score'] is None
+                for item in selected
+            )
+        ):
+            raise ValueError(
+                '所选候选人尚未按当前确认版本完成评分。'
+            )
+
+        return old.create_screening_report(sid, body)
 
 
-@app.get('/sessions/{sid}/reports')
-def reports(sid: str):
-    db.get_session(sid)
-    folder = db.HISTORY_DIR / sid / 'reports'
-    return {'reports': sorted(p.name for p in folder.glob('*.md')) if folder.exists() else []}
+@app.get('/preferences')
+def preferences(hr_id: str):
+    return {
+        'preferences': flow.preferences(hr_id),
+    }
 
 
-@app.get('/sessions/{sid}/reports/{filename}')
-def report_file(sid: str, filename: str):
-    db.get_session(sid)
-    folder = (db.HISTORY_DIR / sid / 'reports').resolve()
-    path = (folder / filename).resolve()
-    if path.parent != folder or path.suffix != '.md' or not path.is_file():
-        raise HTTPException(status_code=404, detail='报告不存在。')
-    return FileResponse(path, filename=filename)
+@app.post('/preferences')
+def save_preference(body: PreferenceRequest):
+    return flow.save_preference(
+        body.hr_id,
+        body.content,
+        body.scope,
+    )
 
 
-@app.post('/sessions/{sid}/chat')
-def chat(sid: str, request: ChatRequest):
-    import agent
-    with _locks[sid], db.session_scope(sid):
-        return agent.chat(sid, request.hr_id, request.message, db.get_session(sid)['jd'])
+@app.put('/preferences/{identifier}')
+def edit_preference(
+    identifier: str,
+    body: PreferenceRequest,
+):
+    flow.edit_preference(
+        body.hr_id,
+        identifier,
+        body.content,
+        body.scope,
+        body.enabled,
+    )
 
-
-@app.post('/sessions/{sid}/clear')
-def clear_chat(sid: str):
-    with _locks[sid]:
-        db.clear_messages(sid)
     return {'success': True}
 
 
-@app.post('/sessions/{sid}/delete/request')
-def delete_request(sid: str, request: DeleteRequest):
-    return db.create_delete_request(sid, request.kind, request.targets)
+@app.delete('/preferences/{identifier}')
+def delete_preference(
+    identifier: str,
+    hr_id: str,
+    confirmed: bool = False,
+):
+    flow.delete_preference(
+        hr_id,
+        identifier,
+        confirmed,
+    )
 
-
-@app.post('/sessions/{sid}/delete/confirm')
-def delete_confirm(sid: str, request: DeleteConfirmRequest):
-    if not request.confirmed:
-        raise ValueError('尚未确认删除。')
-    with _locks[sid]:
-        return db.confirm_delete(sid, request.token)
+    return {'success': True}
